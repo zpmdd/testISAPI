@@ -1,0 +1,23 @@
+# Build output
+target/
+classes/
+lib/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# FFmpeg binaries (project-local, large files)
+ffmpeg/
+
+# Recordings
+recordings/
+
+# Logs
+log/
+*.log

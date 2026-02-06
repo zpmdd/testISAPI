@@ -1,0 +1,1095 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ISAPI 录像机管理工具</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            padding: 20px;
+            color: #fff;
+        }
+        .container { max-width: 1200px; margin: 0 auto; }
+        h1 {
+            text-align: center;
+            margin-bottom: 20px;
+            font-size: 28px;
+            background: linear-gradient(90deg, #00d2ff, #3a7bd5);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+        .tab-btn {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            background: rgba(255,255,255,0.1);
+            color: #aaa;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-size: 14px;
+        }
+        .tab-btn:hover { background: rgba(255,255,255,0.2); }
+        .tab-btn.active {
+            background: linear-gradient(90deg, #00d2ff, #3a7bd5);
+            color: #fff;
+        }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        .card {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 16px;
+            padding: 24px;
+            margin-bottom: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        .card-title {
+            font-size: 18px;
+            margin-bottom: 20px;
+            color: #00d2ff;
+        }
+        .form-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 16px;
+        }
+        .form-group { display: flex; flex-direction: column; gap: 6px; }
+        label { font-size: 14px; color: #aaa; }
+        input, select {
+            padding: 12px 16px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 8px;
+            background: rgba(0, 0, 0, 0.3);
+            color: #fff;
+            font-size: 14px;
+        }
+        input:focus, select:focus {
+            outline: none;
+            border-color: #00d2ff;
+        }
+        .btn-group { display: flex; gap: 12px; margin-top: 20px; flex-wrap: wrap; }
+        button {
+            padding: 12px 20px;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        .btn-primary {
+            background: linear-gradient(90deg, #00d2ff, #3a7bd5);
+            color: #fff;
+        }
+        .btn-success {
+            background: linear-gradient(90deg, #00b09b, #96c93d);
+            color: #fff;
+        }
+        .btn-secondary {
+            background: rgba(255,255,255,0.2);
+            color: #fff;
+        }
+        .btn-danger {
+            background: linear-gradient(90deg, #ff416c, #ff4b2b);
+            color: #fff;
+        }
+        button:hover { transform: translateY(-2px); }
+        button:disabled { opacity: 0.5; cursor: not-allowed; transform: none !important; }
+        .info-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+        }
+        .info-item {
+            background: rgba(0,0,0,0.2);
+            padding: 16px;
+            border-radius: 8px;
+        }
+        .info-label { font-size: 12px; color: #888; margin-bottom: 4px; }
+        .info-value { font-size: 16px; color: #fff; word-break: break-all; }
+        .channel-list, .recording-list { max-height: 300px; overflow-y: auto; }
+        .channel-item, .recording-item {
+            display: flex;
+            align-items: center;
+            padding: 12px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 8px;
+            margin-bottom: 8px;
+            gap: 12px;
+        }
+        .channel-item:hover { background: rgba(0, 0, 0, 0.3); }
+        .channel-info { flex: 1; }
+        .channel-name { font-size: 14px; color: #00d2ff; }
+        .channel-meta { font-size: 12px; color: #888; margin-top: 4px; }
+        .rtsp-box {
+            background: rgba(0,0,0,0.3);
+            padding: 12px;
+            border-radius: 8px;
+            font-family: monospace;
+            font-size: 13px;
+            word-break: break-all;
+            margin-top: 10px;
+        }
+        .copy-btn {
+            padding: 4px 12px;
+            font-size: 12px;
+            margin-left: 10px;
+        }
+        .progress-container { margin-top: 20px; }
+        .progress-bar {
+            height: 8px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #00d2ff, #3a7bd5);
+            transition: width 0.3s;
+            width: 0%;
+        }
+        .progress-text {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 8px;
+            font-size: 14px;
+            color: #aaa;
+        }
+        .download-list { margin-top: 16px; }
+        .download-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 12px;
+            background: rgba(0, 176, 155, 0.2);
+            border-radius: 6px;
+            margin-bottom: 6px;
+        }
+        .download-item a { color: #00d2ff; text-decoration: none; }
+        .storage-item {
+            background: rgba(0,0,0,0.2);
+            padding: 16px;
+            border-radius: 8px;
+            margin-bottom: 10px;
+        }
+        .storage-bar {
+            height: 8px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 4px;
+            margin-top: 10px;
+            overflow: hidden;
+        }
+        .storage-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #00b09b, #96c93d);
+        }
+        .ptz-controls {
+            display: grid;
+            grid-template-columns: repeat(3, 60px);
+            gap: 8px;
+            justify-content: center;
+            margin: 20px 0;
+        }
+        .ptz-btn {
+            width: 60px;
+            height: 60px;
+            border-radius: 50%;
+            font-size: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .ptz-center { background: rgba(255,255,255,0.1); }
+        .zoom-controls {
+            display: flex;
+            gap: 20px;
+            justify-content: center;
+            margin-top: 20px;
+        }
+        .zoom-btn { width: 80px; }
+        .spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid rgba(255,255,255,0.3);
+            border-radius: 50%;
+            border-top-color: #fff;
+            animation: spin 1s linear infinite;
+            margin-right: 8px;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .status-connected { color: #00b09b; }
+        .status-disconnected { color: #ff4b2b; }
+        .empty-state { text-align: center; padding: 40px; color: #666; }
+        .alert {
+            padding: 12px 16px;
+            border-radius: 8px;
+            margin-bottom: 16px;
+        }
+        .alert-success { background: rgba(0, 176, 155, 0.2); border: 1px solid rgba(0, 176, 155, 0.5); }
+        .alert-error { background: rgba(255, 75, 43, 0.2); border: 1px solid rgba(255, 75, 43, 0.5); }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>ISAPI 录像机管理工具</h1>
+        
+        <!-- 连接配置 -->
+        <div class="card">
+            <div class="card-title">设备连接</div>
+            <div class="form-grid">
+                <div class="form-group">
+                    <label>设备IP</label>
+                    <input type="text" id="deviceIp" value="192.168.7.99" placeholder="192.168.1.100">
+                </div>
+                <div class="form-group">
+                    <label>端口</label>
+                    <input type="number" id="port" value="80">
+                </div>
+                <div class="form-group">
+                    <label>用户名</label>
+                    <input type="text" id="username" value="admin">
+                </div>
+                <div class="form-group">
+                    <label>密码</label>
+                    <input type="password" id="password" value="higer12345">
+                </div>
+            </div>
+            <div class="btn-group">
+                <button class="btn-primary" onclick="connect()">连接设备</button>
+                <span id="connectionStatus" style="line-height: 40px; margin-left: 10px;"></span>
+            </div>
+        </div>
+
+        <!-- 功能标签页 -->
+        <div class="tabs">
+            <button class="tab-btn active" onclick="showTab('device')">设备信息</button>
+            <button class="tab-btn" onclick="showTab('channels')">通道管理</button>
+            <button class="tab-btn" onclick="showTab('recordings')">录像搜索</button>
+            <button class="tab-btn" onclick="showTab('preview')">实时预览</button>
+            <button class="tab-btn" onclick="showTab('ptz')">云台控制</button>
+            <button class="tab-btn" onclick="showTab('storage')">存储管理</button>
+        </div>
+
+        <!-- 设备信息 -->
+        <div id="tab-device" class="tab-content active">
+            <div class="card">
+                <div class="card-title">设备信息</div>
+                <div id="deviceInfo" class="info-grid">
+                    <div class="empty-state">请先连接设备</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 通道管理 -->
+        <div id="tab-channels" class="tab-content">
+            <div class="card">
+                <div class="card-title">通道列表 (<span id="channelCount">0</span>)</div>
+                <div id="channelList" class="channel-list">
+                    <div class="empty-state">请先连接设备</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 录像搜索 -->
+        <div id="tab-recordings" class="tab-content">
+            <div class="card">
+                <div class="card-title">录像搜索</div>
+                <div class="form-grid">
+                    <div class="form-group">
+                        <label>通道</label>
+                        <select id="searchChannel"></select>
+                    </div>
+                    <div class="form-group">
+                        <label>开始时间</label>
+                        <input type="datetime-local" id="startTime">
+                    </div>
+                    <div class="form-group">
+                        <label>结束时间</label>
+                        <input type="datetime-local" id="endTime">
+                    </div>
+                    <div class="form-group">
+                        <label>RTSP 端口</label>
+                        <input type="number" id="rtspPort" value="554" min="1" max="65535">
+                    </div>
+                    <div class="form-group">
+                        <label>下载方式</label>
+                        <select id="downloadMode">
+                            <option value="isapi-http" selected>ISAPI HTTP 时间段截取 (快速) - 单文件</option>
+                            <option value="rtsp">RTSP 时间段截取 (ffmpeg) - 单文件</option>
+                            <option value="stream">分段下载 (playbackURI)</option>
+                            <option value="file">文件下载 (downloadPath)</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="download-mode-info" style="margin-top:15px; padding:12px; background:rgba(0,0,0,0.2); border-radius:8px; font-size:13px;">
+                    <div id="modeDescription">
+                        <strong style="color:#00d2ff;">ISAPI HTTP 快速截取 (推荐)</strong>：通过 HTTP 接口直接下载指定时间段录像，速度远快于 RTSP 流，生成<strong>单个连续文件</strong>。如失败将自动回退到 RTSP 方式。
+                    </div>
+                </div>
+                <div class="btn-group">
+                    <button class="btn-primary" id="searchBtn" onclick="searchRecordings()">搜索录像</button>
+                    <button class="btn-success" id="downloadBtn" onclick="startDownload()" disabled>下载全部</button>
+                    <button class="btn-success" id="rtspDownloadBtn" onclick="startRtspDownload()" style="background: linear-gradient(90deg, #ff9800, #f57c00);">直接截取</button>
+                </div>
+            </div>
+            <div class="card" id="recordingsCard" style="display:none;">
+                <div class="card-title">搜索结果 (<span id="recordingCount">0</span>)</div>
+                <div id="recordingList" class="recording-list"></div>
+                <div class="progress-container" id="progressContainer" style="display:none;">
+                    <div style="display:flex; justify-content:space-between; margin-bottom:8px;">
+                        <span id="downloadModeLabel" style="color:#00d2ff; font-size:13px;">下载模式: --</span>
+                        <span id="downloadSpeed" style="color:#96c93d; font-size:13px;"></span>
+                    </div>
+                    <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+                    <div class="progress-text">
+                        <span id="progressText">准备下载...</span>
+                        <span id="progressPercent">0%</span>
+                    </div>
+                    <div id="bytesInfo" style="margin-top:8px; font-size:12px; color:#888;"></div>
+                    <div class="btn-group" style="margin-top:12px;">
+                        <button class="btn-danger" id="cancelTaskBtn" onclick="cancelCurrentTask()" style="display:none;">取消任务</button>
+                    </div>
+                </div>
+                <div id="downloadLogs" style="display:none; margin-top:15px; padding:12px; background:rgba(0,0,0,0.3); border-radius:8px; max-height:150px; overflow-y:auto; font-family:monospace; font-size:11px; color:#aaa;"></div>
+                <div class="download-list" id="downloadList"></div>
+            </div>
+        </div>
+
+        <!-- 实时预览 -->
+        <div id="tab-preview" class="tab-content">
+            <div class="card">
+                <div class="card-title">实时预览地址</div>
+                <div class="form-grid">
+                    <div class="form-group">
+                        <label>通道</label>
+                        <select id="previewChannel"></select>
+                    </div>
+                    <div class="form-group">
+                        <label>码流类型</label>
+                        <select id="streamType">
+                            <option value="1">主码流 (高清)</option>
+                            <option value="2">子码流 (流畅)</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="btn-group">
+                    <button class="btn-primary" onclick="getRtspUrl()">获取预览地址</button>
+                </div>
+                <div id="rtspResult" style="display:none; margin-top:20px;">
+                    <div style="margin-bottom:10px;">
+                        <strong>RTSP 地址:</strong>
+                        <button class="btn-secondary copy-btn" onclick="copyText('rtspUrl')">复制</button>
+                    </div>
+                    <div class="rtsp-box" id="rtspUrl"></div>
+                    <p style="margin-top:10px; font-size:12px; color:#888;">
+                        可使用 VLC、PotPlayer 等播放器打开此地址观看实时画面
+                    </p>
+                </div>
+            </div>
+        </div>
+
+        <!-- 云台控制 -->
+        <div id="tab-ptz" class="tab-content">
+            <div class="card">
+                <div class="card-title">云台控制 (PTZ)</div>
+                <div class="form-grid" style="max-width:400px;">
+                    <div class="form-group">
+                        <label>通道</label>
+                        <select id="ptzChannel"></select>
+                    </div>
+                    <div class="form-group">
+                        <label>速度 (1-7)</label>
+                        <input type="range" id="ptzSpeed" min="1" max="7" value="4">
+                    </div>
+                </div>
+                <div class="ptz-controls">
+                    <div></div>
+                    <button class="btn-secondary ptz-btn" onmousedown="ptzMove('up')" onmouseup="ptzStop()" onmouseleave="ptzStop()">↑</button>
+                    <div></div>
+                    <button class="btn-secondary ptz-btn" onmousedown="ptzMove('left')" onmouseup="ptzStop()" onmouseleave="ptzStop()">←</button>
+                    <button class="btn-secondary ptz-btn ptz-center" onclick="ptzStop()">■</button>
+                    <button class="btn-secondary ptz-btn" onmousedown="ptzMove('right')" onmouseup="ptzStop()" onmouseleave="ptzStop()">→</button>
+                    <div></div>
+                    <button class="btn-secondary ptz-btn" onmousedown="ptzMove('down')" onmouseup="ptzStop()" onmouseleave="ptzStop()">↓</button>
+                    <div></div>
+                </div>
+                <div class="zoom-controls">
+                    <button class="btn-secondary zoom-btn" onmousedown="ptzMove('zoomout')" onmouseup="ptzStop()" onmouseleave="ptzStop()">缩小 -</button>
+                    <button class="btn-secondary zoom-btn" onmousedown="ptzMove('zoomin')" onmouseup="ptzStop()" onmouseleave="ptzStop()">放大 +</button>
+                </div>
+                <div style="margin-top:20px;">
+                    <label>预置点:</label>
+                    <div class="btn-group">
+                        <button class="btn-secondary" onclick="gotoPreset(1)">预置点 1</button>
+                        <button class="btn-secondary" onclick="gotoPreset(2)">预置点 2</button>
+                        <button class="btn-secondary" onclick="gotoPreset(3)">预置点 3</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 存储管理 -->
+        <div id="tab-storage" class="tab-content">
+            <div class="card">
+                <div class="card-title">存储状态</div>
+                <div class="btn-group" style="margin-bottom:20px;">
+                    <button class="btn-primary" onclick="getStorageStatus()">刷新状态</button>
+                </div>
+                <div id="deviceTimeInfo" style="margin-bottom:15px;"></div>
+                <div id="storageList">
+                    <div class="empty-state">请先连接设备并刷新状态</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 初始化时间
+        const now = new Date();
+        const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
+        document.getElementById('endTime').value = formatDateTime(now);
+        document.getElementById('startTime').value = formatDateTime(oneHourAgo);
+
+        function formatDateTime(date) {
+            const pad = n => n.toString().padStart(2, '0');
+            return date.getFullYear() + '-' + pad(date.getMonth()+1) + '-' + pad(date.getDate()) + 
+                   'T' + pad(date.getHours()) + ':' + pad(date.getMinutes());
+        }
+
+        let channelList = [];
+        let currentRecordings = [];
+        let currentTaskId = null;
+        let lastTotalBytes = 0;
+        let lastBytesTime = Date.now();
+        const MAX_DOWNLOAD_RANGE_MINUTES = 1440;
+
+        function getErrorMessage(data, fallbackMessage) {
+            if (!data) return fallbackMessage || '请求失败';
+            return data.error || data.message || data.code || fallbackMessage || '请求失败';
+        }
+
+        function getClientTimezoneOffsetMinutes() {
+            return String(-new Date().getTimezoneOffset());
+        }
+
+        function getRtspPortValue() {
+            const raw = document.getElementById('rtspPort').value || '554';
+            const rtspPort = Number(raw);
+            if (!Number.isInteger(rtspPort) || rtspPort < 1 || rtspPort > 65535) {
+                throw new Error('RTSP 端口必须是 1-65535 的整数');
+            }
+            return String(rtspPort);
+        }
+
+        function validateTimeRange() {
+            const startTime = document.getElementById('startTime').value;
+            const endTime = document.getElementById('endTime').value;
+
+            if (!startTime || !endTime) {
+                throw new Error('开始时间和结束时间不能为空');
+            }
+
+            const startDate = new Date(startTime);
+            const endDate = new Date(endTime);
+            if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
+                throw new Error('时间格式无效');
+            }
+            if (endDate <= startDate) {
+                throw new Error('结束时间必须大于开始时间');
+            }
+
+            const rangeMinutes = Math.floor((endDate - startDate) / 60000);
+            if (rangeMinutes > MAX_DOWNLOAD_RANGE_MINUTES) {
+                throw new Error('时间范围过大，最大允许 ' + MAX_DOWNLOAD_RANGE_MINUTES + ' 分钟');
+            }
+
+            return { startTime, endTime };
+        }
+
+        // 下载模式切换说明
+        document.getElementById('downloadMode').addEventListener('change', function() {
+            const mode = this.value;
+            const desc = document.getElementById('modeDescription');
+            if (mode === 'isapi-http') {
+                desc.innerHTML = '<strong style="color:#00d2ff;">ISAPI HTTP 快速截取 (推荐)</strong>：通过 HTTP 接口直接下载指定时间段录像，速度远快于 RTSP 流，生成<strong>单个连续文件</strong>。如失败将自动回退到 RTSP 方式。';
+            } else if (mode === 'rtsp') {
+                desc.innerHTML = '<strong style="color:#ff9800;">RTSP 时间段截取模式</strong>：通过 FFmpeg 获取 RTSP 回放流，生成<strong>单个连续文件</strong>，速度较慢（接近实时）。';
+            } else if (mode === 'file') {
+                desc.innerHTML = '<strong style="color:#00d2ff;">文件下载模式</strong>：直接下载设备已存储的录像文件，有明确文件大小，下载速度快。';
+            } else if (mode === 'stream') {
+                desc.innerHTML = '<strong style="color:#96c93d;">分段下载模式</strong>：先搜索录像片段，然后逐个下载，会生成多个文件。';
+            }
+        });
+        
+        // 时间段截取下载（支持 ISAPI HTTP 和 RTSP 两种方式）
+        async function startRtspDownload() {
+            const btn = document.getElementById('rtspDownloadBtn');
+            const downloadMode = document.getElementById('downloadMode').value;
+            if (downloadMode !== 'isapi-http' && downloadMode !== 'rtsp') {
+                alert('当前模式不支持“直接截取”，请切换到 ISAPI HTTP 或 RTSP');
+                return;
+            }
+
+            let timeRange;
+            let rtspPort;
+            try {
+                timeRange = validateTimeRange();
+                rtspPort = getRtspPortValue();
+            } catch (e) {
+                alert(e.message);
+                return;
+            }
+
+            btn.disabled = true;
+            btn.innerHTML = '<span class="spinner"></span> 截取中...';
+            document.getElementById('downloadBtn').disabled = true;
+            document.getElementById('recordingsCard').style.display = 'block';
+            document.getElementById('recordingList').innerHTML = '<div class="empty-state">时间段截取模式：直接下载，无需搜索</div>';
+            document.getElementById('progressContainer').style.display = 'block';
+            document.getElementById('downloadList').innerHTML = '';
+            document.getElementById('downloadLogs').style.display = 'block';
+            document.getElementById('downloadLogs').innerHTML = '';
+            
+            // 显示下载模式
+            document.getElementById('downloadModeLabel').textContent = 
+                downloadMode === 'isapi-http' ? '下载模式: ISAPI HTTP 快速截取' : '下载模式: RTSP 时间段截取';
+            document.getElementById('recordingCount').textContent = '1';
+            document.getElementById('cancelTaskBtn').style.display = 'none';
+            
+            // 重置速度计算
+            lastTotalBytes = 0;
+            lastBytesTime = Date.now();
+
+            try {
+                const formData = new URLSearchParams({
+                    ...getFormData(),
+                    channelId: document.getElementById('searchChannel').value,
+                    startTime: timeRange.startTime,
+                    endTime: timeRange.endTime,
+                    rtspPort: rtspPort,
+                    downloadMethod: downloadMode
+                });
+
+                const response = await fetch('/api/rtsp-download', { method: 'POST', body: formData });
+                const data = await response.json();
+
+                if (!response.ok || data.success === false || data.error) {
+                    alert('下载失败: ' + getErrorMessage(data, '请求失败'));
+                    btn.disabled = false;
+                    btn.innerHTML = '直接截取';
+                    document.getElementById('downloadBtn').disabled = false;
+                    return;
+                }
+
+                currentTaskId = data.taskId;
+                document.getElementById('cancelTaskBtn').style.display = 'inline-block';
+                console.log('截取任务创建成功，方式:', data.downloadMethod, '任务ID:', data.taskId);
+                pollDownloadStatus();
+
+            } catch (e) {
+                alert('下载失败: ' + e.message);
+                btn.disabled = false;
+                btn.innerHTML = '直接截取';
+                document.getElementById('downloadBtn').disabled = false;
+            }
+        }
+
+        // 格式化字节数
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        function getFormData() {
+            return {
+                deviceIp: document.getElementById('deviceIp').value,
+                port: document.getElementById('port').value,
+                username: document.getElementById('username').value,
+                password: document.getElementById('password').value,
+                clientTimezoneOffsetMinutes: getClientTimezoneOffsetMinutes()
+            };
+        }
+
+        function showTab(tabId) {
+            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+            event.target.classList.add('active');
+            document.getElementById('tab-' + tabId).classList.add('active');
+        }
+
+        async function connect() {
+            const status = document.getElementById('connectionStatus');
+            status.innerHTML = '<span class="spinner"></span> 连接中...';
+
+            try {
+                // 获取设备信息
+                const formData = new URLSearchParams(getFormData());
+                const response = await fetch('/api/device-info', { method: 'POST', body: formData });
+                const data = await response.json();
+
+                if (!response.ok || data.success === false || data.error) {
+                    status.innerHTML = '<span class="status-disconnected">连接失败: ' + getErrorMessage(data, '请求失败') + '</span>';
+                    return;
+                }
+
+                status.innerHTML = '<span class="status-connected">已连接: ' + data.data.deviceName + '</span>';
+
+                // 显示设备信息
+                document.getElementById('deviceInfo').innerHTML = 
+                    '<div class="info-item"><div class="info-label">设备名称</div><div class="info-value">' + data.data.deviceName + '</div></div>' +
+                    '<div class="info-item"><div class="info-label">型号</div><div class="info-value">' + data.data.model + '</div></div>' +
+                    '<div class="info-item"><div class="info-label">序列号</div><div class="info-value">' + data.data.serialNumber + '</div></div>' +
+                    '<div class="info-item"><div class="info-label">固件版本</div><div class="info-value">' + data.data.firmwareVersion + '</div></div>' +
+                    '<div class="info-item"><div class="info-label">MAC地址</div><div class="info-value">' + (data.data.macAddress || 'N/A') + '</div></div>';
+
+                // 获取通道列表
+                await loadChannels();
+
+            } catch (e) {
+                status.innerHTML = '<span class="status-disconnected">连接失败: ' + e.message + '</span>';
+            }
+        }
+
+        async function loadChannels() {
+            try {
+                const formData = new URLSearchParams(getFormData());
+                const response = await fetch('/api/channels', { method: 'POST', body: formData });
+                const data = await response.json();
+
+                if (!response.ok || data.success === false || data.error) {
+                    console.error('获取通道失败:', getErrorMessage(data, '请求失败'));
+                    return;
+                }
+
+                channelList = data.channels || [];
+                document.getElementById('channelCount').textContent = channelList.length;
+
+                // 更新通道列表显示
+                if (channelList.length > 0) {
+                    document.getElementById('channelList').innerHTML = channelList.map((ch, i) => 
+                        '<div class="channel-item">' +
+                        '<div class="channel-info">' +
+                        '<div class="channel-name">通道 ' + ch.id + ': ' + ch.name + '</div>' +
+                        '<div class="channel-meta">Track ID: ' + ch.trackId + ' | 状态: ' + (ch.enabled ? '启用' : '禁用') + '</div>' +
+                        '</div></div>'
+                    ).join('');
+                } else {
+                    document.getElementById('channelList').innerHTML = '<div class="empty-state">未找到通道</div>';
+                }
+
+                // 更新下拉框
+                updateChannelSelects();
+
+            } catch (e) {
+                console.error('获取通道失败:', e);
+            }
+        }
+
+        function updateChannelSelects() {
+            const selects = ['searchChannel', 'previewChannel', 'ptzChannel'];
+            selects.forEach(selectId => {
+                const select = document.getElementById(selectId);
+                select.innerHTML = '';
+                if (channelList.length === 0) {
+                    // 默认选项
+                    for (let i = 1; i <= 4; i++) {
+                        const opt = document.createElement('option');
+                        opt.value = selectId === 'searchChannel' ? (i * 100 + 1) : i;
+                        opt.textContent = '通道 ' + i;
+                        select.appendChild(opt);
+                    }
+                } else {
+                    channelList.forEach(ch => {
+                        const opt = document.createElement('option');
+                        opt.value = selectId === 'searchChannel' ? ch.trackId : ch.id;
+                        opt.textContent = '通道 ' + ch.id + ': ' + ch.name;
+                        select.appendChild(opt);
+                    });
+                }
+            });
+        }
+        updateChannelSelects();
+
+        async function searchRecordings() {
+            const btn = document.getElementById('searchBtn');
+
+            let timeRange;
+            try {
+                timeRange = validateTimeRange();
+            } catch (e) {
+                alert(e.message);
+                return;
+            }
+
+            btn.disabled = true;
+            btn.innerHTML = '<span class="spinner"></span> 搜索中...';
+
+            try {
+                const formData = new URLSearchParams({
+                    ...getFormData(),
+                    channelId: document.getElementById('searchChannel').value,
+                    startTime: timeRange.startTime,
+                    endTime: timeRange.endTime
+                });
+
+                const response = await fetch('/api/search', { method: 'POST', body: formData });
+                const data = await response.json();
+
+                if (!response.ok || data.success === false || data.error) {
+                    alert('搜索失败: ' + getErrorMessage(data, '请求失败'));
+                    return;
+                }
+
+                currentRecordings = data.recordings || [];
+                document.getElementById('recordingCount').textContent = data.count;
+                document.getElementById('recordingsCard').style.display = 'block';
+                document.getElementById('downloadBtn').disabled = data.count === 0;
+
+                if (data.count === 0) {
+                    document.getElementById('recordingList').innerHTML = '<div class="empty-state">该时间段内没有录像</div>';
+                } else {
+                    document.getElementById('recordingList').innerHTML = data.recordings.map((rec, i) => {
+                        const hasPlaybackURI = rec.playbackURI && rec.playbackURI.length > 0;
+                        const hasDownloadPath = rec.downloadPath && rec.downloadPath.length > 0;
+                        const sizeInfo = rec.contentLength > 0 ? formatBytes(rec.contentLength) : '未知';
+                        return '<div class="recording-item">' +
+                            '<input type="checkbox" checked>' +
+                            '<div class="channel-info" style="flex:1;">' +
+                            '<div class="channel-name">' + rec.startTime.substring(0,19) + ' ~ ' + rec.endTime.substring(0,19) + '</div>' +
+                            '<div class="channel-meta">通道: ' + rec.trackId + ' | 类型: ' + rec.eventType + ' | 大小: ' + sizeInfo + '</div>' +
+                            '<div class="channel-meta" style="margin-top:2px;">' +
+                            '<span style="color:' + (hasDownloadPath ? '#00d2ff' : '#666') + ';">文件下载: ' + (hasDownloadPath ? '✓' : '✗') + '</span> | ' +
+                            '<span style="color:' + (hasPlaybackURI ? '#96c93d' : '#666') + ';">流式下载: ' + (hasPlaybackURI ? '✓' : '✗') + '</span>' +
+                            '</div>' +
+                            '</div></div>';
+                    }).join('');
+                }
+
+                document.getElementById('downloadList').innerHTML = '';
+                document.getElementById('progressContainer').style.display = 'none';
+                document.getElementById('cancelTaskBtn').style.display = 'none';
+
+            } catch (e) {
+                alert('搜索失败: ' + e.message);
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = '搜索录像';
+            }
+        }
+
+        async function startDownload() {
+            const btn = document.getElementById('downloadBtn');
+            const downloadMode = document.getElementById('downloadMode').value;
+            if (downloadMode === 'rtsp' || downloadMode === 'isapi-http') {
+                alert('当前为 时间段截取模式，请点击“直接截取”按钮');
+                return;
+            }
+            let timeRange;
+            let rtspPort;
+            try {
+                timeRange = validateTimeRange();
+                rtspPort = getRtspPortValue();
+            } catch (e) {
+                alert(e.message);
+                return;
+            }
+            
+            btn.disabled = true;
+            btn.innerHTML = '<span class="spinner"></span> 下载中...';
+            document.getElementById('rtspDownloadBtn').disabled = true;
+            document.getElementById('progressContainer').style.display = 'block';
+            document.getElementById('downloadList').innerHTML = '';
+            document.getElementById('downloadLogs').style.display = 'block';
+            document.getElementById('downloadLogs').innerHTML = '';
+            document.getElementById('cancelTaskBtn').style.display = 'none';
+            
+            // 显示下载模式
+            document.getElementById('downloadModeLabel').textContent = 
+                '下载模式: ' + (downloadMode === 'stream' ? '流式下载' : '文件下载');
+            
+            // 重置速度计算
+            lastTotalBytes = 0;
+            lastBytesTime = Date.now();
+
+            try {
+                const formData = new URLSearchParams({
+                    ...getFormData(),
+                    channelId: document.getElementById('searchChannel').value,
+                    startTime: timeRange.startTime,
+                    endTime: timeRange.endTime,
+                    downloadMode: downloadMode,
+                    rtspPort: rtspPort
+                });
+
+                const response = await fetch('/api/download', { method: 'POST', body: formData });
+                const data = await response.json();
+
+                if (!response.ok || data.success === false || data.error) {
+                    alert('下载失败: ' + getErrorMessage(data, '请求失败'));
+                    btn.disabled = false;
+                    btn.innerHTML = '下载全部';
+                    document.getElementById('rtspDownloadBtn').disabled = false;
+                    return;
+                }
+
+                currentTaskId = data.taskId;
+                document.getElementById('cancelTaskBtn').style.display = 'inline-block';
+                console.log('下载任务创建成功，模式:', data.downloadMode, '任务ID:', data.taskId);
+                pollDownloadStatus();
+
+            } catch (e) {
+                alert('下载失败: ' + e.message);
+                btn.disabled = false;
+                btn.innerHTML = '下载全部';
+                document.getElementById('rtspDownloadBtn').disabled = false;
+            }
+        }
+
+        async function pollDownloadStatus() {
+            if (!currentTaskId) return;
+
+            try {
+                const response = await fetch('/api/download-status?taskId=' + currentTaskId);
+                const data = await response.json();
+                if (!response.ok || data.success === false || data.error) {
+                    if (response.status === 404) {
+                        document.getElementById('downloadBtn').disabled = false;
+                        document.getElementById('downloadBtn').innerHTML = '下载全部';
+                        document.getElementById('rtspDownloadBtn').disabled = false;
+                        document.getElementById('rtspDownloadBtn').innerHTML = '直接截取';
+                        document.getElementById('cancelTaskBtn').style.display = 'none';
+                        document.getElementById('progressText').textContent = '任务不存在或已过期';
+                        currentTaskId = null;
+                        return;
+                    }
+                    throw new Error(getErrorMessage(data, '获取下载状态失败'));
+                }
+
+                // 计算文件级别进度
+                const fileProgress = data.total > 0 ? (data.current / data.total) * 100 : 0;
+                
+                // 计算当前文件的字节进度（如果有的话）
+                let displayProgress = fileProgress;
+                if (data.expectedBytes > 0 && data.totalBytes > 0) {
+                    const fileByteProgress = (data.totalBytes / data.expectedBytes) * 100;
+                    // 混合进度：完成的文件 + 当前文件进度
+                    displayProgress = ((data.current - 1) / data.total * 100) + (fileByteProgress / data.total);
+                }
+                
+                document.getElementById('progressFill').style.width = Math.min(displayProgress, 100) + '%';
+                document.getElementById('progressPercent').textContent = Math.round(displayProgress) + '%';
+                document.getElementById('progressText').textContent = '下载 ' + data.current + '/' + data.total + 
+                    (data.currentFile ? ' (' + data.currentFile.substring(0,19) + ')' : '');
+
+                // 显示字节信息
+                const bytesInfo = document.getElementById('bytesInfo');
+                if (data.downloadMode === 'stream' || data.totalBytes > 0) {
+                    let info = '当前文件: ' + formatBytes(data.totalBytes);
+                    if (data.expectedBytes > 0) {
+                        info += ' / ' + formatBytes(data.expectedBytes);
+                    }
+                    info += ' | 总计: ' + formatBytes(data.totalDownloadedBytes);
+                    bytesInfo.textContent = info;
+                } else {
+                    bytesInfo.textContent = '';
+                }
+
+                // 更新下载模式标签（反映 effectiveMethod 和回退状态）
+                if (data.effectiveMethod) {
+                    const modeLabel = document.getElementById('downloadModeLabel');
+                    if (data.fallbackUsed) {
+                        modeLabel.textContent = '下载模式: ISAPI HTTP -> 已回退 RTSP';
+                        modeLabel.style.color = '#ff9800';
+                    } else if (data.effectiveMethod === 'isapi-http') {
+                        modeLabel.textContent = '下载模式: ISAPI HTTP 快速截取';
+                        modeLabel.style.color = '#00d2ff';
+                    } else if (data.effectiveMethod === 'rtsp') {
+                        modeLabel.textContent = '下载模式: RTSP 时间段截取';
+                        modeLabel.style.color = '#ff9800';
+                    }
+                }
+
+                // 计算下载速度
+                const now = Date.now();
+                const timeDiff = (now - lastBytesTime) / 1000;
+                if (timeDiff >= 1 && data.totalDownloadedBytes > lastTotalBytes) {
+                    const bytesDiff = data.totalDownloadedBytes - lastTotalBytes + data.totalBytes;
+                    const speed = bytesDiff / timeDiff;
+                    document.getElementById('downloadSpeed').textContent = '速度: ' + formatBytes(speed) + '/s';
+                    lastTotalBytes = data.totalDownloadedBytes;
+                    lastBytesTime = now;
+                }
+
+                // 显示日志
+                if (data.logs && data.logs.length > 0) {
+                    const logsDiv = document.getElementById('downloadLogs');
+                    logsDiv.innerHTML = data.logs.map(log => '<div>' + log + '</div>').join('');
+                    logsDiv.scrollTop = logsDiv.scrollHeight;
+                }
+
+                // 显示已下载文件
+                if (data.files && data.files.length > 0) {
+                    document.getElementById('downloadList').innerHTML = data.files.map(file => 
+                        '<div class="download-item"><span>' + file + '</span>' +
+                        '<a href="/downloads/' + file + '" download>下载</a></div>'
+                    ).join('');
+                }
+
+                const status = data.status || '';
+                const isFailed = status.startsWith('failed');
+                const isTerminal = status === 'completed' || status === 'cancelled' || isFailed;
+                if (isTerminal) {
+                    document.getElementById('downloadBtn').disabled = false;
+                    document.getElementById('downloadBtn').innerHTML = '下载全部';
+                    document.getElementById('rtspDownloadBtn').disabled = false;
+                    document.getElementById('rtspDownloadBtn').innerHTML = '直接截取';
+                    document.getElementById('cancelTaskBtn').style.display = 'none';
+                    
+                    const totalMB = (data.totalDownloadedBytes / 1024 / 1024).toFixed(2);
+                    document.getElementById('progressText').textContent = 
+                        (status === 'completed' ? '完成!' : (status === 'cancelled' ? '已取消!' : '失败!')) + 
+                        ' 成功:' + data.success + ' 失败:' + data.failed + 
+                        ' 总计:' + totalMB + 'MB' +
+                        (data.message ? ' | ' + data.message : '');
+                    
+                    document.getElementById('downloadSpeed').textContent = '';
+                    currentTaskId = null;
+                } else {
+                    setTimeout(pollDownloadStatus, 1000);
+                }
+            } catch (e) {
+                console.error('获取下载状态失败:', e);
+                setTimeout(pollDownloadStatus, 2000);
+            }
+        }
+
+        async function cancelCurrentTask() {
+            if (!currentTaskId) return;
+            try {
+                const response = await fetch('/api/download-status?taskId=' + encodeURIComponent(currentTaskId), { method: 'DELETE' });
+                const data = await response.json();
+                if (!response.ok || data.success === false || data.error) {
+                    alert('取消失败: ' + getErrorMessage(data, '请求失败'));
+                    return;
+                }
+                document.getElementById('cancelTaskBtn').style.display = 'none';
+                setTimeout(pollDownloadStatus, 500);
+            } catch (e) {
+                alert('取消失败: ' + e.message);
+            }
+        }
+
+        async function getRtspUrl() {
+            try {
+                const formData = new URLSearchParams({
+                    ...getFormData(),
+                    channelId: document.getElementById('previewChannel').value,
+                    streamType: document.getElementById('streamType').value
+                });
+
+                const response = await fetch('/api/rtsp-url', { method: 'POST', body: formData });
+                const data = await response.json();
+
+                if (!response.ok || data.success === false || data.error) {
+                    alert('获取失败: ' + getErrorMessage(data, '请求失败'));
+                    return;
+                }
+
+                document.getElementById('rtspUrl').textContent = data.rtspUrl;
+                document.getElementById('rtspResult').style.display = 'block';
+
+            } catch (e) {
+                alert('获取失败: ' + e.message);
+            }
+        }
+
+        function copyText(elementId) {
+            const text = document.getElementById(elementId).textContent;
+            navigator.clipboard.writeText(text).then(() => {
+                alert('已复制到剪贴板');
+            });
+        }
+
+        async function ptzMove(action) {
+            try {
+                const formData = new URLSearchParams({
+                    ...getFormData(),
+                    channelId: document.getElementById('ptzChannel').value,
+                    action: action,
+                    speed: document.getElementById('ptzSpeed').value
+                });
+                await fetch('/api/ptz', { method: 'POST', body: formData });
+            } catch (e) {
+                console.error('PTZ 控制失败:', e);
+            }
+        }
+
+        async function ptzStop() {
+            await ptzMove('stop');
+        }
+
+        async function gotoPreset(presetId) {
+            try {
+                const formData = new URLSearchParams({
+                    ...getFormData(),
+                    channelId: document.getElementById('ptzChannel').value,
+                    action: 'preset_' + presetId
+                });
+                await fetch('/api/ptz', { method: 'POST', body: formData });
+            } catch (e) {
+                alert('预置点调用失败: ' + e.message);
+            }
+        }
+
+        async function getStorageStatus() {
+            try {
+                const formData = new URLSearchParams(getFormData());
+                const response = await fetch('/api/storage', { method: 'POST', body: formData });
+                const data = await response.json();
+
+                if (!response.ok || data.success === false || data.error) {
+                    alert('获取失败: ' + getErrorMessage(data, '请求失败'));
+                    return;
+                }
+
+                if (data.deviceTime) {
+                    document.getElementById('deviceTimeInfo').innerHTML = 
+                        '<div class="info-item"><div class="info-label">设备时间</div><div class="info-value">' + data.deviceTime + '</div></div>';
+                }
+
+                if (data.storages && data.storages.length > 0) {
+                    document.getElementById('storageList').innerHTML = data.storages.map(s => {
+                        const capacity = parseFloat(s.capacity) || 0;
+                        const free = parseFloat(s.freeSpace) || 0;
+                        const used = capacity - free;
+                        const percent = capacity > 0 ? ((used / capacity) * 100).toFixed(1) : 0;
+                        return '<div class="storage-item">' +
+                            '<div><strong>' + s.name + '</strong> (' + s.status + ')</div>' +
+                            '<div style="font-size:12px;color:#888;margin-top:5px;">容量: ' + s.capacity + ' | 剩余: ' + s.freeSpace + '</div>' +
+                            '<div class="storage-bar"><div class="storage-fill" style="width:' + percent + '%"></div></div>' +
+                            '</div>';
+                    }).join('');
+                } else {
+                    document.getElementById('storageList').innerHTML = '<div class="empty-state">未获取到存储信息</div>';
+                }
+
+            } catch (e) {
+                alert('获取失败: ' + e.message);
+            }
+        }
+    </script>
+</body>
+</html>
