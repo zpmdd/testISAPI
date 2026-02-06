@@ -1312,12 +1312,20 @@ public class ISAPIWebServer {
         throw new IOException(errorMsg.toString());
     }
     
-    // 构建下载请求 XML（使用 CDATA 包裹 playbackURI，避免 & 等字符破坏 XML）
+    // 构建下载请求 XML（使用 XML 实体转义，不使用 CDATA）
+    // 此方法由流式下载(downloadStream)使用，playbackURI 来自搜索结果，已包含 name/size
     private static String buildDownloadXml(String playbackURI) {
-        return "<?xml version='1.0' encoding='UTF-8'?>" +
-               "<downloadRequest>" +
-               "<playbackURI><![CDATA[" + playbackURI + "]]></playbackURI>" +
-               "</downloadRequest>";
+        return buildSimpleDownloadXml(playbackURI);
+    }
+
+    private static String escapeXmlText(String value) {
+        if (value == null || value.isEmpty()) return "";
+        return value
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace("\"", "&quot;")
+                .replace("'", "&apos;");
     }
     
     // 从 playbackURI 构建 playback URL
@@ -1367,7 +1375,9 @@ public class ISAPIWebServer {
     
     // ==================== ISAPI HTTP 精确时间段下载 ====================
 
-    // ISAPI HTTP 方式下载精确时间段录像（单文件），尝试多种 playbackURI 变体
+    // ISAPI HTTP 方式下载精确时间段录像（单文件）
+    // 核心流程：先搜索录像获取完整 playbackURI（含 name/size），再用该 URI 发起下载
+    // 参考实现：HikLoad、qb60/hikvision-downloader 等开源项目
     private static long downloadViaISAPIHttp(OkHttpClient client, String deviceIp, int port,
                                              String channelId, String startTime, String endTime,
                                              String saveFilePath, DownloadTask task) throws IOException {
@@ -1381,15 +1391,54 @@ public class ISAPIWebServer {
 
         addTaskLog(task, String.format("ISAPI HTTP 精确时间: %s ~ %s", startTime, endTime));
 
-        // 尝试多种 playbackURI 格式（含尾斜杠变体，与 RTSP URL 回退策略对齐）
-        List<String> playbackURIs = Arrays.asList(
-                String.format("rtsp://%s/Streaming/tracks/%s?starttime=%s&endtime=%s", deviceIp, channelId, startTime, endTime),
-                String.format("rtsp://%s/Streaming/tracks/%s/?starttime=%s&endtime=%s", deviceIp, channelId, startTime, endTime),
-                String.format("rtsp://%s/Streaming/channels/%s?starttime=%s&endtime=%s", deviceIp, channelId, startTime, endTime),
-                String.format("rtsp://%s/ISAPI/Streaming/tracks/%s?starttime=%s&endtime=%s", deviceIp, channelId, startTime, endTime)
-        );
+        // ---- 步骤1: 搜索录像，获取包含 name/size 的完整 playbackURI ----
+        // 海康 ISAPI 协议要求 /ISAPI/ContentMgmt/download 使用搜索结果中的完整 playbackURI
+        // 手动构造的 URI（不含 name/size）会导致 NVR 返回 "Invalid XML Content" 错误
+        List<String> searchPlaybackURIs = new ArrayList<>();
+
+        // 将 RTSP 时间格式（20260205T223400Z）转为搜索 API 需要的 ISO 格式（2026-02-05T22:34:00Z）
+        String searchStart = convertRtspTimeToIso(startTime);
+        String searchEnd = convertRtspTimeToIso(endTime);
+
+        log.info("[ISAPI HTTP] 搜索录像: 通道=%s, 时间=%s ~ %s", channelId, searchStart, searchEnd);
+        addTaskLog(task, String.format("搜索录像: %s ~ %s", searchStart, searchEnd));
+
+        try {
+            List<RecordingInfo> recordings = searchRecordings(client, deviceIp, port, channelId, searchStart, searchEnd);
+            log.info("[ISAPI HTTP] 搜索到 %d 条录像", recordings.size());
+            addTaskLog(task, String.format("搜索到 %d 条录像", recordings.size()));
+
+            for (RecordingInfo rec : recordings) {
+                if (rec.playbackURI != null && !rec.playbackURI.isEmpty()) {
+                    searchPlaybackURIs.add(rec.playbackURI);
+                    log.debug("[ISAPI HTTP] 搜索到 playbackURI: %s", rec.playbackURI);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("[ISAPI HTTP] 搜索录像失败: %s，将使用手动构造的 URI 作为回退", e.getMessage());
+            addTaskLog(task, "搜索录像失败: " + e.getMessage() + "，尝试手动构造 URI");
+        }
+
+        // ---- 步骤2: 构建 playbackURI 列表（优先使用搜索结果） ----
+        List<String> playbackURIs = new ArrayList<>(searchPlaybackURIs);
+
+        // 如果搜索没有结果，添加手动构造的 URI 作为回退
+        if (playbackURIs.isEmpty()) {
+            log.warn("[ISAPI HTTP] 未搜索到录像，使用手动构造的 playbackURI 作为回退");
+            addTaskLog(task, "未搜索到录像，使用手动构造的 URI");
+            playbackURIs.addAll(Arrays.asList(
+                    String.format("rtsp://%s/Streaming/tracks/%s?starttime=%s&endtime=%s", deviceIp, channelId, startTime, endTime),
+                    String.format("rtsp://%s/Streaming/tracks/%s/?starttime=%s&endtime=%s", deviceIp, channelId, startTime, endTime)
+            ));
+        }
+
+        // ---- 步骤3: 获取下载 token（海康 Web 界面下载时使用此机制） ----
+        String downloadToken = getDownloadToken(client, deviceIp, port, log);
 
         String downloadUrl = String.format("http://%s:%d/ISAPI/ContentMgmt/download", deviceIp, port);
+        String downloadUrlWithToken = downloadToken != null
+                ? String.format("http://%s:%d/ISAPI/ContentMgmt/download?token=%s", deviceIp, port, downloadToken)
+                : null;
 
         // 为 ISAPI HTTP 下载创建专用客户端（更长的超时时间）
         OkHttpClient streamClient = client.newBuilder()
@@ -1401,39 +1450,79 @@ public class ISAPIWebServer {
         String tempFile = saveFilePath + ".isapi.tmp";
         IOException lastError = null;
 
+        // ---- 步骤4: 逐个尝试 playbackURI 进行下载 ----
+        // 每个 URI 尝试: GET+token → GET → POST（参考 HikLoad 和 Wireshark 抓包）
+        int totalAttempts = playbackURIs.size();
         try {
-            for (int idx = 0; idx < playbackURIs.size(); idx++) {
+            for (int uriIdx = 0; uriIdx < playbackURIs.size(); uriIdx++) {
                 if (task.cancelRequested) throw new IOException("任务已取消");
-                String playbackURI = playbackURIs.get(idx);
-                String label = String.format("变体 %d/%d", idx + 1, playbackURIs.size());
+                String playbackURI = playbackURIs.get(uriIdx);
 
-                addAttemptedUrl(task, downloadUrl);
-                addTaskLog(task, String.format("%s: %s", label,
-                        playbackURI.length() > 80 ? playbackURI.substring(0, 80) + "..." : playbackURI));
+                // 构建简洁的下载 XML（不带 version/namespace 属性，与 HikLoad/qb60 实现一致）
+                String xmlBody = buildSimpleDownloadXml(playbackURI);
+                String shortUri = playbackURI.length() > 120 ? playbackURI.substring(0, 120) + "..." : playbackURI;
 
-                String xmlBody = buildDownloadXml(playbackURI);
-                RequestBody requestBody = RequestBody.create(
-                        MediaType.parse("application/xml; charset=utf-8"), xmlBody);
-                Request request = new Request.Builder()
-                        .url(downloadUrl)
-                        .post(requestBody)
-                        .addHeader("Accept", "*/*")
-                        .addHeader("Content-Type", "application/xml")
-                        .build();
+                // 依次尝试 GET+token, GET, POST
+                String[][] methods;
+                if (downloadUrlWithToken != null) {
+                    methods = new String[][]{
+                            {"GET", downloadUrlWithToken, "GET+token"},
+                            {"GET", downloadUrl, "GET"},
+                            {"POST", downloadUrl, "POST"}
+                    };
+                } else {
+                    methods = new String[][]{
+                            {"GET", downloadUrl, "GET"},
+                            {"POST", downloadUrl, "POST"}
+                    };
+                }
 
-                try {
-                    long bytes = executeHttpStreamDownload(streamClient, request, tempFile, task, log, label);
-                    if (bytes > 0) {
-                        addTaskLog(task, String.format("%s 下载成功: %d 字节", label, bytes));
-                        // 下载成功，检查并转封装
-                        finalizeDownloadFile(tempFile, saveFilePath, task, log);
-                        return new File(saveFilePath).length();
+                for (String[] methodInfo : methods) {
+                    if (task.cancelRequested) throw new IOException("任务已取消");
+                    String httpMethod = methodInfo[0];
+                    String url = methodInfo[1];
+                    String methodLabel = methodInfo[2];
+
+                    String label = String.format("URI %d/%d(%s), HTTP %s",
+                            uriIdx + 1, totalAttempts,
+                            searchPlaybackURIs.contains(playbackURI) ? "搜索结果" : "手动构造",
+                            methodLabel);
+
+                    addAttemptedUrl(task, url);
+                    addTaskLog(task, String.format("%s, playbackURI: %s", label, shortUri));
+                    log.info("[ISAPI HTTP] %s", label);
+                    log.debug("[ISAPI HTTP] playbackURI: %s", playbackURI);
+                    log.debug("[ISAPI HTTP] XML: %s", xmlBody);
+
+                    RequestBody requestBody = RequestBody.create(
+                            MediaType.parse("application/xml; charset=utf-8"), xmlBody);
+                    Request.Builder reqBuilder = new Request.Builder()
+                            .url(url)
+                            .addHeader("Accept", "*/*")
+                            .addHeader("Content-Type", "application/xml");
+                    if ("GET".equals(httpMethod)) {
+                        reqBuilder.method("GET", requestBody);
+                    } else {
+                        reqBuilder.post(requestBody);
                     }
-                } catch (IOException e) {
-                    lastError = e;
-                    log.warn("[ISAPI HTTP] %s 失败: %s", label, e.getMessage());
-                    addTaskLog(task, String.format("%s 失败: %s", label, e.getMessage()));
-                    cleanupTmpFile(tempFile);
+                    Request request = reqBuilder.build();
+
+                    try {
+                        long bytes = executeHttpStreamDownload(streamClient, request, tempFile, task, log, label);
+                        if (bytes > 0) {
+                            addTaskLog(task, String.format("%s 下载成功: %d 字节", label, bytes));
+                            // 下载成功，检查并转封装
+                            finalizeDownloadFile(tempFile, saveFilePath, task, log);
+                            return new File(saveFilePath).length();
+                        }
+                    } catch (IOException e) {
+                        lastError = e;
+                        String errMsg = e.getMessage();
+                        if (errMsg != null && errMsg.length() > 200) errMsg = errMsg.substring(0, 200) + "...";
+                        log.warn("[ISAPI HTTP] %s 失败: %s", label, errMsg);
+                        addTaskLog(task, String.format("%s 失败: %s", label, errMsg));
+                        cleanupTmpFile(tempFile);
+                    }
                 }
             }
         } finally {
@@ -1442,7 +1531,41 @@ public class ISAPIWebServer {
         }
 
         if (lastError != null) throw lastError;
-        throw new IOException("所有 ISAPI HTTP playbackURI 变体均失败");
+        throw new IOException("所有 ISAPI HTTP 请求变体均失败");
+    }
+
+    // 构建简洁的下载请求 XML（无 namespace，与 HikLoad/qb60/hikvision-downloader 一致）
+    // 海康设备对 <downloadRequest> 上的 version/xmlns 属性可能不兼容
+    private static String buildSimpleDownloadXml(String playbackURI) {
+        // 使用 XML 实体转义 & 符号（海康 ISAPI 文档 3.3 节明确要求）
+        String escapedUri = escapeXmlText(playbackURI);
+        return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>" +
+                "<downloadRequest>" +
+                "<playbackURI>" + escapedUri + "</playbackURI>" +
+                "</downloadRequest>";
+    }
+
+    // 将 RTSP 时间格式转换为 ISO 搜索格式
+    // 20260205T223400Z → 2026-02-05T22:34:00Z
+    private static String convertRtspTimeToIso(String rtspTime) {
+        if (rtspTime == null || rtspTime.isEmpty()) return rtspTime;
+        try {
+            // 移除末尾的 Z
+            String t = rtspTime.replace("Z", "");
+            // 解析: 20260205T223400
+            if (t.length() >= 15 && t.contains("T")) {
+                String datePart = t.substring(0, t.indexOf('T'));
+                String timePart = t.substring(t.indexOf('T') + 1);
+                // 日期: 20260205 → 2026-02-05
+                String isoDate = datePart.substring(0, 4) + "-" + datePart.substring(4, 6) + "-" + datePart.substring(6, 8);
+                // 时间: 223400 → 22:34:00
+                String isoTime = timePart.substring(0, 2) + ":" + timePart.substring(2, 4) + ":" + timePart.substring(4, 6);
+                return isoDate + "T" + isoTime + "Z";
+            }
+        } catch (Exception e) {
+            // 解析失败，返回原始值
+        }
+        return rtspTime;
     }
 
     // 执行 HTTP 流式下载到文件（带取消挂接和进度回报）
