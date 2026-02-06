@@ -49,6 +49,8 @@ public class ISAPIWebServer {
     private static final int MAX_DOWNLOAD_RANGE_MINUTES = getEnvInt("MAX_DOWNLOAD_RANGE_MINUTES", 1440);
     private static final int STREAM_READ_TIMEOUT_SECONDS = getEnvInt("STREAM_READ_TIMEOUT_SECONDS", 600);
     private static final int FFMPEG_TIMEOUT_SECONDS = getEnvInt("FFMPEG_TIMEOUT_SECONDS", 1800);
+    private static final int FFMPEG_STALL_TIMEOUT_SECONDS = getEnvInt("FFMPEG_STALL_TIMEOUT_SECONDS", 30);
+    private static final int FFMPEG_GRACEFUL_QUIT_SECONDS = getEnvInt("FFMPEG_GRACEFUL_QUIT_SECONDS", 10);
     private static final int TASK_TTL_MINUTES = getEnvInt("TASK_TTL_MINUTES", 30);
     private static final int MAX_TASK_LOG_LINES = getEnvInt("MAX_TASK_LOG_LINES", 500);
     private static final int RTSP_PORT_DEFAULT = getEnvInt("RTSP_PORT_DEFAULT", 554);
@@ -1953,11 +1955,48 @@ public class ISAPIWebServer {
         return nodes.getLength() > 0 ? nodes.item(0).getTextContent() : "";
     }
 
+    /**
+     * 向 ffmpeg 进程发送 'q' 实现优雅退出（让 ffmpeg 正常写入 MP4 moov atom），
+     * 如果超时仍未退出则强制终止。
+     */
+    private static void gracefulStopFfmpeg(Process process, Logger log) {
+        // 1. 尝试向 stdin 发送 'q' 让 ffmpeg 优雅退出
+        try {
+            OutputStream stdin = process.getOutputStream();
+            stdin.write('q');
+            stdin.flush();
+            stdin.close();
+            log.info("[ffmpeg] 已发送 'q' 指令，等待优雅退出...");
+        } catch (IOException e) {
+            log.warn("[ffmpeg] 发送 'q' 失败: %s，将强制终止", e.getMessage());
+            process.destroyForcibly();
+            return;
+        }
+
+        // 2. 等待优雅退出
+        try {
+            boolean exited = process.waitFor(FFMPEG_GRACEFUL_QUIT_SECONDS, TimeUnit.SECONDS);
+            if (exited) {
+                log.info("[ffmpeg] 优雅退出成功，退出码: %d", process.exitValue());
+            } else {
+                log.warn("[ffmpeg] 优雅退出超时(%ds)，强制终止", FFMPEG_GRACEFUL_QUIT_SECONDS);
+                process.destroyForcibly();
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            process.destroyForcibly();
+        }
+    }
+
     private static long runFfmpegCapture(String ffmpegPath, String rtspUrl, String saveFilePath, DownloadTask task) throws IOException {
         Logger log = Logger.getLogger(ISAPIWebServer.class);
 
+        // 构建 ffmpeg 命令，添加 RTSP 套接字空闲超时防止无限等待
+        long stallTimeoutMicros = FFMPEG_STALL_TIMEOUT_SECONDS * 1_000_000L;
         List<String> cmd = new ArrayList<>();
         cmd.add(ffmpegPath);
+        cmd.add("-rw_timeout");
+        cmd.add(String.valueOf(stallTimeoutMicros)); // RTSP 套接字读写超时（微秒）
         cmd.add("-rtsp_transport");
         cmd.add("tcp");
         cmd.add("-i");
@@ -1970,6 +2009,7 @@ public class ISAPIWebServer {
         cmd.add(saveFilePath);
 
         addTaskLog(task, "执行 ffmpeg: " + maskRtspUrl(rtspUrl));
+        addTaskLog(task, String.format("卡死检测: %ds, RTSP超时: %ds", FFMPEG_STALL_TIMEOUT_SECONDS, FFMPEG_STALL_TIMEOUT_SECONDS));
         ProcessBuilder pb = new ProcessBuilder(cmd);
         pb.redirectErrorStream(true);
 
@@ -1977,12 +2017,33 @@ public class ISAPIWebServer {
         task.activeProcess = process;
         touchTask(task);
 
+        // 用于卡死检测的共享状态
+        final long[] lastProgressInfo = new long[]{System.currentTimeMillis(), 0L}; // [lastChangeTime, lastFrameCount]
+        final boolean[] stallDetected = new boolean[]{false};
+
         Thread outputReader = new Thread(() -> {
             try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
                 String line;
                 long lastLogTime = 0L;
+                Pattern framePattern = Pattern.compile("frame=\\s*(\\d+)");
                 while ((line = reader.readLine()) != null) {
                     log.debug("[ffmpeg] %s", line);
+
+                    // 解析 frame= 用于卡死检测
+                    if (line.contains("frame=")) {
+                        Matcher m = framePattern.matcher(line);
+                        if (m.find()) {
+                            long frameCount = Long.parseLong(m.group(1));
+                            synchronized (lastProgressInfo) {
+                                if (frameCount != lastProgressInfo[1]) {
+                                    lastProgressInfo[0] = System.currentTimeMillis();
+                                    lastProgressInfo[1] = frameCount;
+                                }
+                            }
+                        }
+                    }
+
+                    // 定期向前端输出进度
                     if (line.contains("time=")) {
                         long now = System.currentTimeMillis();
                         if (now - lastLogTime >= 3000) {
@@ -1994,8 +2055,9 @@ public class ISAPIWebServer {
                             lastLogTime = now;
                         }
                     }
+
                     if (task.cancelRequested) {
-                        process.destroyForcibly();
+                        gracefulStopFfmpeg(process, log);
                         return;
                     }
                 }
@@ -2007,29 +2069,84 @@ public class ISAPIWebServer {
         outputReader.start();
 
         try {
-            boolean finished = process.waitFor(FFMPEG_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-            outputReader.join(5000);
-            if (!finished) {
-                process.destroyForcibly();
-                throw new IOException("ffmpeg 超时(" + FFMPEG_TIMEOUT_SECONDS + "s)");
+            // 主动轮询循环：每2秒检查一次进程状态和卡死标志
+            long startTime = System.currentTimeMillis();
+            boolean finished = false;
+            while (!finished) {
+                finished = process.waitFor(2, TimeUnit.SECONDS);
+                if (finished) break;
+
+                // 检查取消请求
+                if (task.cancelRequested) {
+                    gracefulStopFfmpeg(process, log);
+                    outputReader.join(5000);
+                    throw new IOException("任务已取消");
+                }
+
+                // 检查总超时
+                long elapsed = (System.currentTimeMillis() - startTime) / 1000;
+                if (elapsed >= FFMPEG_TIMEOUT_SECONDS) {
+                    log.warn("[ffmpeg] 总超时(%ds)，优雅退出...", FFMPEG_TIMEOUT_SECONDS);
+                    addTaskLog(task, String.format("ffmpeg 总超时(%ds)，正在停止...", FFMPEG_TIMEOUT_SECONDS));
+                    gracefulStopFfmpeg(process, log);
+                    outputReader.join(5000);
+                    throw new IOException("ffmpeg 超时(" + FFMPEG_TIMEOUT_SECONDS + "s)");
+                }
+
+                // 卡死检测：frame 数在阈值时间内无变化
+                synchronized (lastProgressInfo) {
+                    long timeSinceLastChange = (System.currentTimeMillis() - lastProgressInfo[0]) / 1000;
+                    if (lastProgressInfo[1] > 0 && timeSinceLastChange >= FFMPEG_STALL_TIMEOUT_SECONDS) {
+                        if (!stallDetected[0]) {
+                            stallDetected[0] = true;
+                            log.info("[ffmpeg] 检测到卡死: %d秒无新帧 (最后帧数: %d)，优雅退出...",
+                                    timeSinceLastChange, lastProgressInfo[1]);
+                            addTaskLog(task, String.format("流已结束（%d秒无新数据），正在完成封装...", timeSinceLastChange));
+                            gracefulStopFfmpeg(process, log);
+                            // 等待进程退出后跳出循环
+                            process.waitFor(FFMPEG_GRACEFUL_QUIT_SECONDS, TimeUnit.SECONDS);
+                            finished = !process.isAlive();
+                            if (!finished) {
+                                process.destroyForcibly();
+                                finished = true;
+                            }
+                            break;
+                        }
+                    }
+                }
             }
+
+            outputReader.join(5000);
+
             if (task.cancelRequested) {
                 throw new IOException("任务已取消");
             }
+
             int exitCode = process.exitValue();
-            if (exitCode != 0) {
+            // 卡死后优雅退出的 ffmpeg 可能返回非0退出码（如被信号终止），但文件可能是有效的
+            if (exitCode != 0 && !stallDetected[0]) {
                 throw new IOException("ffmpeg 执行失败，退出码: " + exitCode);
             }
+            if (exitCode != 0 && stallDetected[0]) {
+                log.warn("[ffmpeg] 卡死后退出码: %d（非0），但文件可能有效，继续检查...", exitCode);
+            }
+
             File outputFile = new File(saveFilePath);
             if (!outputFile.exists() || outputFile.length() <= 0) {
                 throw new IOException("ffmpeg 输出文件为空或不存在");
             }
+            log.info("[ffmpeg] 完成: 文件大小 %.2f MB, 退出码: %d, 卡死检测: %s",
+                    outputFile.length() / 1024.0 / 1024.0, exitCode, stallDetected[0] ? "是" : "否");
             return outputFile.length();
         } catch (InterruptedException e) {
-            process.destroyForcibly();
+            gracefulStopFfmpeg(process, log);
             Thread.currentThread().interrupt();
             throw new IOException("ffmpeg 执行被中断", e);
         } finally {
+            // 确保进程已终止
+            if (process.isAlive()) {
+                process.destroyForcibly();
+            }
             task.activeProcess = null;
             touchTask(task);
         }
@@ -2103,7 +2220,8 @@ public class ISAPIWebServer {
         Process p = task.activeProcess;
         if (p != null) {
             try {
-                p.destroyForcibly();
+                // 优先尝试优雅退出（让 ffmpeg 写入 moov atom），失败再强杀
+                gracefulStopFfmpeg(p, Logger.getLogger(ISAPIWebServer.class));
             } catch (Exception ignored) {
                 // ignore
             }
