@@ -16,6 +16,7 @@ import java.io.*;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URLDecoder;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.time.*;
@@ -642,6 +643,15 @@ public class ISAPIWebServer {
                 String.format("rtsp://%s:%s@%s:%d/ISAPI/Streaming/tracks/%s?%s", encodedUser, encodedPassword, deviceIp, rtspPort, channelId, query)
         );
 
+        double requestedDurationSeconds = computeRequestedDurationSeconds(startTime, endTime);
+        if (requestedDurationSeconds > 0) {
+            log.info("[RTSP截取] 目标时长: %.3f 秒", requestedDurationSeconds);
+            addTaskLog(task, String.format("目标时长: %.3f 秒", requestedDurationSeconds));
+        } else {
+            log.warn("[RTSP截取] 无法解析目标时长，按设备返回流结束");
+            addTaskLog(task, "无法解析目标时长，按设备返回流结束");
+        }
+
         IOException lastError = null;
         for (String rtspUrl : rtspUrls) {
             if (task.cancelRequested) {
@@ -649,7 +659,7 @@ public class ISAPIWebServer {
             }
             addAttemptedUrl(task, maskRtspUrl(rtspUrl));
             try {
-                long bytes = runFfmpegCapture(ffmpegPath, rtspUrl, saveFilePath, task);
+                long bytes = runFfmpegCapture(ffmpegPath, rtspUrl, saveFilePath, task, requestedDurationSeconds);
                 task.totalBytes = bytes;
                 return bytes;
             } catch (IOException e) {
@@ -1166,25 +1176,22 @@ public class ISAPIWebServer {
             errors.add(err);
         }
         
-        // ==================== 方法2: GET + XML Body + Token ====================
-        log.info("[流式下载] 尝试方法2: GET + XML Body + Token (兼容回退)");
-        addTaskLog(task, "方法2: GET + XML Body + Token (兼容回退)");
+        // ==================== 方法2: GET + query + Token ====================
+        log.info("[流式下载] 尝试方法2: GET + query + Token (兼容回退)");
+        addTaskLog(task, "方法2: GET + query + Token (兼容回退)");
         try {
             String token = getDownloadToken(client, deviceIp, port, log);
             if (token != null) {
-                String url = String.format("http://%s:%d/ISAPI/ContentMgmt/download?token=%s", deviceIp, port, token);
-                String xmlBody = buildDownloadXml(playbackURI);
+                String baseUrl = String.format("http://%s:%d/ISAPI/ContentMgmt/download?token=%s", deviceIp, port, token);
+                String url = appendPlaybackUriParam(baseUrl, playbackURI);
                 
                 log.debug("[流式下载] 方法2 URL: %s", url);
-                log.debug("[流式下载] 方法2 XML Body: %s", xmlBody);
                 addTaskLog(task, "URL: " + url);
                 
-                RequestBody requestBody = RequestBody.create(MediaType.parse("application/xml; charset=utf-8"), xmlBody);
                 Request request = new Request.Builder()
                         .url(url)
-                        .method("GET", requestBody)
+                        .get()
                         .addHeader("Accept", "*/*")
-                        .addHeader("Content-Type", "application/xml")
                         .build();
                 
                 long result = tryStreamDownload(streamClient, request, saveFilePath, task, log, "方法2");
@@ -1204,9 +1211,9 @@ public class ISAPIWebServer {
             errors.add(err);
         }
         
-        // ==================== 方法3: GET + XML Body (legacy fallback) ====================
-        log.info("[流式下载] 尝试方法3: GET + XML Body (legacy fallback)");
-        addTaskLog(task, "方法3: GET + XML Body (legacy fallback)");
+        // ==================== 方法3: PUT + XML Body (legacy fallback) ====================
+        log.info("[流式下载] 尝试方法3: PUT + XML Body (legacy fallback)");
+        addTaskLog(task, "方法3: PUT + XML Body (legacy fallback)");
         try {
             String url = String.format("http://%s:%d/ISAPI/ContentMgmt/download", deviceIp, port);
             String xmlBody = buildDownloadXml(playbackURI);
@@ -1217,7 +1224,7 @@ public class ISAPIWebServer {
             RequestBody requestBody = RequestBody.create(MediaType.parse("application/xml; charset=utf-8"), xmlBody);
             Request request = new Request.Builder()
                     .url(url)
-                    .method("GET", requestBody)
+                    .put(requestBody)
                     .addHeader("Accept", "*/*")
                     .addHeader("Content-Type", "application/xml")
                     .build();
@@ -1372,6 +1379,301 @@ public class ISAPIWebServer {
         
         return null;
     }
+
+    // 在 URL 上追加 playbackURI 参数（自动处理已有 query）
+    private static String appendPlaybackUriParam(String baseUrl, String playbackURI) {
+        try {
+            String encoded = URLEncoder.encode(valueOrEmpty(playbackURI), "UTF-8")
+                    .replace("+", "%20");
+            return baseUrl + (baseUrl.contains("?") ? "&" : "?") + "playbackURI=" + encoded;
+        } catch (UnsupportedEncodingException e) {
+            throw new IllegalStateException("UTF-8 编码不可用", e);
+        }
+    }
+
+    // 构建 ISAPI 下载请求
+    // - POST/PUT: XML body
+    // - GET: query 参数（避免 GET+body 被 OkHttp 拒绝）
+    private static Request buildIsapiDownloadRequest(String baseUrl, String httpMethod,
+                                                     String playbackURI, String xmlBody) {
+        Request.Builder reqBuilder = new Request.Builder()
+                .addHeader("Accept", "*/*");
+
+        switch (httpMethod) {
+            case "GET": {
+                String requestUrl = appendPlaybackUriParam(baseUrl, playbackURI);
+                return reqBuilder.url(requestUrl).get().build();
+            }
+            case "POST": {
+                RequestBody requestBody = RequestBody.create(
+                        MediaType.parse("application/xml; charset=utf-8"), xmlBody);
+                return reqBuilder
+                        .url(baseUrl)
+                        .addHeader("Content-Type", "application/xml")
+                        .post(requestBody)
+                        .build();
+            }
+            case "PUT": {
+                RequestBody requestBody = RequestBody.create(
+                        MediaType.parse("application/xml; charset=utf-8"), xmlBody);
+                return reqBuilder
+                        .url(baseUrl)
+                        .addHeader("Content-Type", "application/xml")
+                        .put(requestBody)
+                        .build();
+            }
+            default:
+                throw new IllegalArgumentException("不支持的 HTTP 方法: " + httpMethod);
+        }
+    }
+
+    // 基于搜索返回的 playbackURI 派生“请求窗口版本”的 playbackURI。
+    // 某些机型允许在保留 name/size 的同时缩窄 start/end，实现按窗口下载。
+    private static String buildRequestedPlaybackUri(String playbackURI, String requestStartRtsp, String requestEndRtsp) {
+        if (playbackURI == null || playbackURI.isEmpty() || !playbackURI.contains("?")) {
+            return playbackURI;
+        }
+        int queryIdx = playbackURI.indexOf('?');
+        String base = playbackURI.substring(0, queryIdx);
+        String query = playbackURI.substring(queryIdx + 1);
+
+        String[] parts = query.split("&");
+        List<String> rebuilt = new ArrayList<>();
+        boolean hasStart = false;
+        boolean hasEnd = false;
+        for (String part : parts) {
+            if (part == null || part.isEmpty()) continue;
+            int eq = part.indexOf('=');
+            if (eq <= 0) {
+                rebuilt.add(part);
+                continue;
+            }
+            String key = part.substring(0, eq);
+            if ("starttime".equalsIgnoreCase(key)) {
+                rebuilt.add(key + "=" + requestStartRtsp);
+                hasStart = true;
+            } else if ("endtime".equalsIgnoreCase(key)) {
+                rebuilt.add(key + "=" + requestEndRtsp);
+                hasEnd = true;
+            } else {
+                rebuilt.add(part);
+            }
+        }
+        if (!hasStart) rebuilt.add("starttime=" + requestStartRtsp);
+        if (!hasEnd) rebuilt.add("endtime=" + requestEndRtsp);
+        return base + "?" + String.join("&", rebuilt);
+    }
+
+    private static String getPlaybackQueryParam(String playbackURI, String key) {
+        if (playbackURI == null || key == null) return null;
+        int queryIdx = playbackURI.indexOf('?');
+        if (queryIdx < 0 || queryIdx == playbackURI.length() - 1) return null;
+        String query = playbackURI.substring(queryIdx + 1);
+        String[] parts = query.split("&");
+        for (String part : parts) {
+            int eq = part.indexOf('=');
+            if (eq <= 0) continue;
+            String k = part.substring(0, eq);
+            if (k.equalsIgnoreCase(key)) {
+                String raw = part.substring(eq + 1);
+                try {
+                    return URLDecoder.decode(raw, "UTF-8");
+                } catch (Exception ignored) {
+                    return raw;
+                }
+            }
+        }
+        return null;
+    }
+
+    // 解析 RTSP 时间（yyyyMMdd'T'HHmmss'Z'）或 ISO UTC 时间为 UTC 本地时间对象
+    private static LocalDateTime parseAsUtcDateTime(String text) {
+        if (text == null || text.trim().isEmpty()) return null;
+        String value = text.trim();
+
+        try {
+            return LocalDateTime.parse(value, RTSP_TIME_FORMAT);
+        } catch (Exception ignored) {
+        }
+
+        try {
+            Instant instant = Instant.parse(value);
+            return LocalDateTime.ofInstant(instant, ZoneOffset.UTC);
+        } catch (Exception ignored) {
+        }
+
+        try {
+            if (value.endsWith("Z")) {
+                String withoutZ = value.substring(0, value.length() - 1);
+                return LocalDateTime.parse(withoutZ, DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss"));
+            }
+        } catch (Exception ignored) {
+        }
+
+        return null;
+    }
+
+    // ISO UTC 时间转 RTSP 时间格式
+    private static String convertIsoToRtsp(String isoTime) {
+        LocalDateTime parsed = parseAsUtcDateTime(isoTime);
+        if (parsed == null) return null;
+        return RTSP_TIME_FORMAT.format(parsed);
+    }
+
+    // 某些设备 /ISAPI/ContentMgmt/download 会返回整段录像（如 1 小时），
+    // 这里在本地按请求窗口二次裁剪，保证输出时长与用户请求一致。
+    private static void trimToRequestedTimeWindowIfNeeded(String finalFile,
+                                                          String segmentStartText, String segmentEndText,
+                                                          String requestStartRtsp, String requestEndRtsp,
+                                                          DownloadTask task, Logger log) throws IOException {
+        if (segmentStartText == null || segmentEndText == null) {
+            return;
+        }
+
+        try {
+            LocalDateTime segmentStart = parseAsUtcDateTime(segmentStartText);
+            LocalDateTime segmentEnd = parseAsUtcDateTime(segmentEndText);
+            LocalDateTime requestStart = parseAsUtcDateTime(requestStartRtsp);
+            LocalDateTime requestEnd = parseAsUtcDateTime(requestEndRtsp);
+            if (segmentStart == null || segmentEnd == null || requestStart == null || requestEnd == null) {
+                log.warn("[ISAPI HTTP] 裁剪时间解析失败，segment=%s~%s request=%s~%s",
+                        segmentStartText, segmentEndText, requestStartRtsp, requestEndRtsp);
+                addTaskLog(task, "裁剪时间解析失败，保留原文件");
+                return;
+            }
+
+            if (!segmentEnd.isAfter(segmentStart) || !requestEnd.isAfter(requestStart)) {
+                return;
+            }
+
+            LocalDateTime clipStart = requestStart.isAfter(segmentStart) ? requestStart : segmentStart;
+            LocalDateTime clipEnd = requestEnd.isBefore(segmentEnd) ? requestEnd : segmentEnd;
+            if (!clipEnd.isAfter(clipStart)) {
+                return;
+            }
+
+            long segmentMillis = Duration.between(segmentStart, segmentEnd).toMillis();
+            long clipMillis = Duration.between(clipStart, clipEnd).toMillis();
+            if (Math.abs(segmentMillis - clipMillis) < 1500L) {
+                return; // 本身已接近请求窗口，无需裁剪
+            }
+
+            long offsetMillis = Duration.between(segmentStart, clipStart).toMillis();
+            if (offsetMillis < 0) offsetMillis = 0;
+
+            String offsetSeconds = String.format(Locale.ROOT, "%.3f", offsetMillis / 1000.0);
+            String durationSeconds = String.format(Locale.ROOT, "%.3f", clipMillis / 1000.0);
+            log.info("[ISAPI HTTP] 检测到返回整段录像，执行本地裁剪: offset=%ss, duration=%ss",
+                    offsetSeconds, durationSeconds);
+            addTaskLog(task, String.format("本地裁剪: offset=%ss, duration=%ss", offsetSeconds, durationSeconds));
+
+            trimFileByFfmpeg(finalFile, offsetSeconds, durationSeconds, task, log);
+        } catch (Exception e) {
+            log.warn("[ISAPI HTTP] 计算裁剪窗口失败，跳过裁剪: %s", e.getMessage());
+            addTaskLog(task, "裁剪窗口计算失败，保留原文件");
+        }
+    }
+
+    // 使用 ffmpeg 对本地文件按偏移/时长裁剪（分级策略：copy → copy+aac → copy+无音频）
+    private static void trimFileByFfmpeg(String inputFile, String offsetSeconds, String durationSeconds,
+                                         DownloadTask task, Logger log) throws IOException {
+        String ffmpegPath = findFfmpeg();
+        if (ffmpegPath == null) {
+            log.warn("[裁剪] 未找到 ffmpeg，跳过裁剪");
+            addTaskLog(task, "未找到 ffmpeg，跳过裁剪");
+            return;
+        }
+
+        String legacyTmp = inputFile + ".clip.tmp";
+        String outputTmp = inputFile + ".clip.tmp.mp4";
+        cleanupTmpFile(legacyTmp);
+        cleanupTmpFile(outputTmp);
+
+        String[][] strategies = {
+                {"-c", "copy", "-movflags", "+faststart"},
+                {"-c:v", "copy", "-c:a", "aac", "-b:a", "64k", "-movflags", "+faststart"},
+                {"-c:v", "copy", "-an", "-movflags", "+faststart"},
+        };
+
+        IOException lastError = null;
+        for (int i = 0; i < strategies.length; i++) {
+            if (task.cancelRequested) throw new IOException("任务已取消");
+            try {
+                List<String> cmd = new ArrayList<>();
+                cmd.add(ffmpegPath);
+                cmd.add("-ss");
+                cmd.add(offsetSeconds);
+                cmd.add("-i");
+                cmd.add(inputFile);
+                cmd.add("-t");
+                cmd.add(durationSeconds);
+                cmd.addAll(Arrays.asList(strategies[i]));
+                cmd.add("-f");
+                cmd.add("mp4");
+                cmd.add("-y");
+                cmd.add(outputTmp);
+
+                addTaskLog(task, String.format("裁剪策略 %d/%d: %s", i + 1, strategies.length,
+                        String.join(" ", strategies[i])));
+                log.info("[裁剪] 策略 %d/%d: ffmpeg %s", i + 1, strategies.length,
+                        String.join(" ", cmd.subList(1, cmd.size())));
+
+                ProcessBuilder pb = new ProcessBuilder(cmd);
+                pb.redirectErrorStream(true);
+                Process process = pb.start();
+                task.activeProcess = process;
+                touchTask(task);
+
+                Thread reader = new Thread(() -> {
+                    try (BufferedReader br = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+                        while (br.readLine() != null) { /* 消耗输出，避免阻塞 */ }
+                    } catch (Exception ignored) {}
+                }, "clip-output-reader");
+                reader.setDaemon(true);
+                reader.start();
+
+                try {
+                    boolean finished = process.waitFor(180, TimeUnit.SECONDS);
+                    reader.join(3000);
+                    if (!finished) {
+                        process.destroyForcibly();
+                        throw new IOException("裁剪超时");
+                    }
+                    if (task.cancelRequested) {
+                        process.destroyForcibly();
+                        throw new IOException("任务已取消");
+                    }
+                    if (process.exitValue() == 0) {
+                        File out = new File(outputTmp);
+                        if (out.exists() && out.length() > 0) {
+                            atomicMove(outputTmp, inputFile);
+                            addTaskLog(task, String.format("裁剪成功 (策略 %d)", i + 1));
+                            log.info("[裁剪] 策略 %d 成功，输出 %d 字节", i + 1, new File(inputFile).length());
+                            return;
+                        }
+                    }
+                    cleanupTmpFile(outputTmp);
+                    log.warn("[裁剪] 策略 %d 退出码 %d，尝试下一个", i + 1, process.exitValue());
+                } finally {
+                    task.activeProcess = null;
+                    touchTask(task);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("裁剪被中断", e);
+            } catch (IOException e) {
+                if (task.cancelRequested || isCancellationException(e)) {
+                    throw e;
+                }
+                lastError = e;
+                cleanupTmpFile(outputTmp);
+                log.warn("[裁剪] 策略 %d 失败: %s", i + 1, e.getMessage());
+            }
+        }
+
+        if (lastError != null) throw lastError;
+        throw new IOException("裁剪失败");
+    }
     
     // ==================== ISAPI HTTP 精确时间段下载 ====================
 
@@ -1394,7 +1696,8 @@ public class ISAPIWebServer {
         // ---- 步骤1: 搜索录像，获取包含 name/size 的完整 playbackURI ----
         // 海康 ISAPI 协议要求 /ISAPI/ContentMgmt/download 使用搜索结果中的完整 playbackURI
         // 手动构造的 URI（不含 name/size）会导致 NVR 返回 "Invalid XML Content" 错误
-        List<String> searchPlaybackURIs = new ArrayList<>();
+        Set<String> searchPlaybackURIs = new LinkedHashSet<>();
+        Map<String, String[]> playbackUriMeta = new LinkedHashMap<>();
 
         // 将 RTSP 时间格式（20260205T223400Z）转为搜索 API 需要的 ISO 格式（2026-02-05T22:34:00Z）
         String searchStart = convertRtspTimeToIso(startTime);
@@ -1410,8 +1713,25 @@ public class ISAPIWebServer {
 
             for (RecordingInfo rec : recordings) {
                 if (rec.playbackURI != null && !rec.playbackURI.isEmpty()) {
-                    searchPlaybackURIs.add(rec.playbackURI);
-                    log.debug("[ISAPI HTTP] 搜索到 playbackURI: %s", rec.playbackURI);
+                    String sourcePlaybackUri = rec.playbackURI;
+                    String sourceSegmentStartRtsp = convertIsoToRtsp(rec.startTime);
+                    String sourceSegmentEndRtsp = convertIsoToRtsp(rec.endTime);
+                    if (sourceSegmentStartRtsp == null || sourceSegmentStartRtsp.isEmpty()) {
+                        sourceSegmentStartRtsp = getPlaybackQueryParam(sourcePlaybackUri, "starttime");
+                    }
+                    if (sourceSegmentEndRtsp == null || sourceSegmentEndRtsp.isEmpty()) {
+                        sourceSegmentEndRtsp = getPlaybackQueryParam(sourcePlaybackUri, "endtime");
+                    }
+
+                    String tunedPlaybackUri = buildRequestedPlaybackUri(sourcePlaybackUri, startTime, endTime);
+                    if (tunedPlaybackUri != null && !tunedPlaybackUri.equals(sourcePlaybackUri)) {
+                        searchPlaybackURIs.add(tunedPlaybackUri);
+                        playbackUriMeta.putIfAbsent(tunedPlaybackUri, new String[]{sourceSegmentStartRtsp, sourceSegmentEndRtsp});
+                        log.debug("[ISAPI HTTP] 搜索到衍生 playbackURI(请求窗口): %s", tunedPlaybackUri);
+                    }
+                    searchPlaybackURIs.add(sourcePlaybackUri);
+                    playbackUriMeta.putIfAbsent(sourcePlaybackUri, new String[]{sourceSegmentStartRtsp, sourceSegmentEndRtsp});
+                    log.debug("[ISAPI HTTP] 搜索到 playbackURI: %s", sourcePlaybackUri);
                 }
             }
         } catch (Exception e) {
@@ -1420,16 +1740,19 @@ public class ISAPIWebServer {
         }
 
         // ---- 步骤2: 构建 playbackURI 列表（优先使用搜索结果） ----
-        List<String> playbackURIs = new ArrayList<>(searchPlaybackURIs);
+        List<String> playbackURIs = new ArrayList<>(playbackUriMeta.keySet());
 
         // 如果搜索没有结果，添加手动构造的 URI 作为回退
         if (playbackURIs.isEmpty()) {
             log.warn("[ISAPI HTTP] 未搜索到录像，使用手动构造的 playbackURI 作为回退");
             addTaskLog(task, "未搜索到录像，使用手动构造的 URI");
-            playbackURIs.addAll(Arrays.asList(
-                    String.format("rtsp://%s/Streaming/tracks/%s?starttime=%s&endtime=%s", deviceIp, channelId, startTime, endTime),
-                    String.format("rtsp://%s/Streaming/tracks/%s/?starttime=%s&endtime=%s", deviceIp, channelId, startTime, endTime)
-            ));
+            String manualUri1 = String.format("rtsp://%s/Streaming/tracks/%s?starttime=%s&endtime=%s",
+                    deviceIp, channelId, startTime, endTime);
+            String manualUri2 = String.format("rtsp://%s/Streaming/tracks/%s/?starttime=%s&endtime=%s",
+                    deviceIp, channelId, startTime, endTime);
+            playbackUriMeta.putIfAbsent(manualUri1, new String[]{startTime, endTime});
+            playbackUriMeta.putIfAbsent(manualUri2, new String[]{startTime, endTime});
+            playbackURIs = new ArrayList<>(playbackUriMeta.keySet());
         }
 
         // ---- 步骤3: 获取下载 token（海康 Web 界面下载时使用此机制） ----
@@ -1451,7 +1774,8 @@ public class ISAPIWebServer {
         IOException lastError = null;
 
         // ---- 步骤4: 逐个尝试 playbackURI 进行下载 ----
-        // 每个 URI 尝试: GET+token → GET → POST（参考 HikLoad 和 Wireshark 抓包）
+        // 每个 URI 尝试: POST(+token) → PUT(+token) → GET(query)
+        // 说明：不同海康固件对 download 接口兼容性不同，组合尝试以提高成功率
         int totalAttempts = playbackURIs.size();
         try {
             for (int uriIdx = 0; uriIdx < playbackURIs.size(); uriIdx++) {
@@ -1462,18 +1786,22 @@ public class ISAPIWebServer {
                 String xmlBody = buildSimpleDownloadXml(playbackURI);
                 String shortUri = playbackURI.length() > 120 ? playbackURI.substring(0, 120) + "..." : playbackURI;
 
-                // 依次尝试 GET+token, GET, POST
+                // 依次尝试 POST/PUT/GET(query)
                 String[][] methods;
                 if (downloadUrlWithToken != null) {
                     methods = new String[][]{
-                            {"GET", downloadUrlWithToken, "GET+token"},
-                            {"GET", downloadUrl, "GET"},
-                            {"POST", downloadUrl, "POST"}
+                            {"POST", downloadUrlWithToken, "POST+token"},
+                            {"POST", downloadUrl, "POST"},
+                            {"PUT", downloadUrlWithToken, "PUT+token"},
+                            {"PUT", downloadUrl, "PUT"},
+                            {"GET", downloadUrlWithToken, "GET+token+query"},
+                            {"GET", downloadUrl, "GET+query"}
                     };
                 } else {
                     methods = new String[][]{
-                            {"GET", downloadUrl, "GET"},
-                            {"POST", downloadUrl, "POST"}
+                            {"POST", downloadUrl, "POST"},
+                            {"PUT", downloadUrl, "PUT"},
+                            {"GET", downloadUrl, "GET+query"}
                     };
                 }
 
@@ -1488,36 +1816,37 @@ public class ISAPIWebServer {
                             searchPlaybackURIs.contains(playbackURI) ? "搜索结果" : "手动构造",
                             methodLabel);
 
-                    addAttemptedUrl(task, url);
-                    addTaskLog(task, String.format("%s, playbackURI: %s", label, shortUri));
-                    log.info("[ISAPI HTTP] %s", label);
-                    log.debug("[ISAPI HTTP] playbackURI: %s", playbackURI);
-                    log.debug("[ISAPI HTTP] XML: %s", xmlBody);
-
-                    RequestBody requestBody = RequestBody.create(
-                            MediaType.parse("application/xml; charset=utf-8"), xmlBody);
-                    Request.Builder reqBuilder = new Request.Builder()
-                            .url(url)
-                            .addHeader("Accept", "*/*")
-                            .addHeader("Content-Type", "application/xml");
-                    if ("GET".equals(httpMethod)) {
-                        reqBuilder.method("GET", requestBody);
-                    } else {
-                        reqBuilder.post(requestBody);
-                    }
-                    Request request = reqBuilder.build();
-
                     try {
+                        Request request = buildIsapiDownloadRequest(url, httpMethod, playbackURI, xmlBody);
+
+                        addAttemptedUrl(task, request.url().toString());
+                        addTaskLog(task, String.format("%s, playbackURI: %s", label, shortUri));
+                        log.info("[ISAPI HTTP] %s", label);
+                        log.debug("[ISAPI HTTP] playbackURI: %s", playbackURI);
+                        log.debug("[ISAPI HTTP] 请求URL: %s", request.url());
+                        if (!"GET".equals(httpMethod)) {
+                            log.debug("[ISAPI HTTP] XML: %s", xmlBody);
+                        }
+
                         long bytes = executeHttpStreamDownload(streamClient, request, tempFile, task, log, label);
                         if (bytes > 0) {
                             addTaskLog(task, String.format("%s 下载成功: %d 字节", label, bytes));
                             // 下载成功，检查并转封装
                             finalizeDownloadFile(tempFile, saveFilePath, task, log);
+                            // 某些 NVR 会返回整段录像文件，这里按请求时间再裁剪一次，确保输出时长准确
+                            String[] segmentMeta = playbackUriMeta.get(playbackURI);
+                            String segmentStartRtsp = segmentMeta != null ? segmentMeta[0] : startTime;
+                            String segmentEndRtsp = segmentMeta != null ? segmentMeta[1] : endTime;
+                            trimToRequestedTimeWindowIfNeeded(saveFilePath, segmentStartRtsp, segmentEndRtsp,
+                                    startTime, endTime, task, log);
                             return new File(saveFilePath).length();
                         }
-                    } catch (IOException e) {
-                        lastError = e;
-                        String errMsg = e.getMessage();
+                    } catch (Exception e) {
+                        IOException normalized = (e instanceof IOException)
+                                ? (IOException) e
+                                : new IOException(e.getMessage(), e);
+                        lastError = normalized;
+                        String errMsg = normalized.getMessage();
                         if (errMsg != null && errMsg.length() > 200) errMsg = errMsg.substring(0, 200) + "...";
                         log.warn("[ISAPI HTTP] %s 失败: %s", label, errMsg);
                         addTaskLog(task, String.format("%s 失败: %s", label, errMsg));
@@ -1566,6 +1895,15 @@ public class ISAPIWebServer {
             // 解析失败，返回原始值
         }
         return rtspTime;
+    }
+
+    private static double computeRequestedDurationSeconds(String startTime, String endTime) {
+        LocalDateTime start = parseAsUtcDateTime(startTime);
+        LocalDateTime end = parseAsUtcDateTime(endTime);
+        if (start == null || end == null || !end.isAfter(start)) {
+            return -1;
+        }
+        return Duration.between(start, end).toMillis() / 1000.0;
     }
 
     // 执行 HTTP 流式下载到文件（带取消挂接和进度回报）
@@ -2111,19 +2449,26 @@ public class ISAPIWebServer {
         }
     }
 
-    private static long runFfmpegCapture(String ffmpegPath, String rtspUrl, String saveFilePath, DownloadTask task) throws IOException {
+    private static long runFfmpegCapture(String ffmpegPath, String rtspUrl, String saveFilePath,
+                                         DownloadTask task, double requestedDurationSeconds) throws IOException {
         Logger log = Logger.getLogger(ISAPIWebServer.class);
 
         // 构建 ffmpeg 命令，添加 RTSP 套接字空闲超时防止无限等待
+        // ffmpeg 7.x RTSP demuxer 常用 -timeout（微秒），-rw_timeout 在部分构建中不存在
         long stallTimeoutMicros = FFMPEG_STALL_TIMEOUT_SECONDS * 1_000_000L;
         List<String> cmd = new ArrayList<>();
         cmd.add(ffmpegPath);
-        cmd.add("-rw_timeout");
+        cmd.add("-timeout");
         cmd.add(String.valueOf(stallTimeoutMicros)); // RTSP 套接字读写超时（微秒）
         cmd.add("-rtsp_transport");
         cmd.add("tcp");
         cmd.add("-i");
         cmd.add(rtspUrl);
+        if (requestedDurationSeconds > 0) {
+            // 关键：设备可能忽略 starttime/endtime 返回整段录像，强制本地截取时长
+            cmd.add("-t");
+            cmd.add(String.format(Locale.ROOT, "%.3f", requestedDurationSeconds));
+        }
         cmd.add("-c:v");
         cmd.add("copy");   // 视频直接复制，不重编码
         cmd.add("-c:a");

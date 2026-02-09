@@ -198,7 +198,9 @@ Web 服务器提供以下 REST 接口：
 | `ISAPI_TIME_MODE` | `DEVICE_LOCAL_LITERAL_Z` | 时间模式，可选 `DEVICE_LOCAL_LITERAL_Z` / `UTC_Z` |
 | `MAX_DOWNLOAD_RANGE_MINUTES` | `1440` | 最大下载时间范围（分钟） |
 | `STREAM_READ_TIMEOUT_SECONDS` | `600` | 流式下载 / ISAPI HTTP 下载读取超时（秒） |
-| `FFMPEG_TIMEOUT_SECONDS` | `1800` | RTSP 截取 FFmpeg 超时（秒） |
+| `FFMPEG_TIMEOUT_SECONDS` | `1800` | RTSP 截取 FFmpeg 总超时（秒） |
+| `FFMPEG_STALL_TIMEOUT_SECONDS` | `30` | RTSP 截取时 FFmpeg 无输出判定卡死超时（秒） |
+| `FFMPEG_GRACEFUL_QUIT_SECONDS` | `10` | RTSP 截取结束时等待 FFmpeg 优雅退出的时间（秒） |
 | `TASK_TTL_MINUTES` | `30` | 已完成/失败/取消任务保留时长（分钟） |
 | `MAX_TASK_LOG_LINES` | `500` | 单任务日志最大保留行数 |
 | `RTSP_PORT_DEFAULT` | `554` | RTSP 默认端口 |
@@ -232,13 +234,15 @@ python3 mock_server.py
 
 ## 日志
 
-日志同时输出到控制台和文件，日志文件按日期存放在 `./log/` 目录：
+日志同时输出到控制台和文件，日志文件按日期存放在 `./log/` 目录，文件名格式为 `isapi_yyyy-MM-dd.log`：
 
 ```
-log/isapi_2026-02-06.log
+log/isapi_2026-02-09.log
 ```
 
-支持 DEBUG、INFO、WARN、ERROR 四个级别。
+- 支持 DEBUG、INFO、WARN、ERROR 四个级别，默认 DEBUG。
+- 控制台与文件均使用 UTF-8 编码，跨平台一致。
+- RTSP 截取任务会记录目标时长、尝试的 URL、进度等详细日志，便于排查问题。
 
 ## 注意事项
 
@@ -249,6 +253,13 @@ log/isapi_2026-02-06.log
 - 流式下载会自动尝试多种方式（POST+XML、GET+Token、StreamingProxy 等），兼容不同固件版本
 - 搜索录像时会尝试 3 种 XML 命名空间格式，兼容不同设备型号
 - ISAPI HTTP 下载使用 CDATA 包裹 playbackURI，避免 URL 中的 `&` 破坏 XML
+- 流式下载方法2 使用 GET + query 参数传递 playbackURI（避免 GET 带 body 的兼容问题），方法3 使用 PUT + XML Body
+
+## 最近更新
+
+- **RTSP 截取**：增加目标时长计算与日志输出，便于确认请求时间范围；支持 FFmpeg 卡死超时与优雅退出时间配置（`FFMPEG_STALL_TIMEOUT_SECONDS`、`FFMPEG_GRACEFUL_QUIT_SECONDS`）。
+- **流式下载**：方法2 改为 GET + `playbackURI` query 参数；方法3 改为 PUT + XML Body；新增 playbackURI 请求窗口派生，兼容按时间段缩窄下载的机型。
+- **环境变量**：README 与环境变量表已同步上述 FFmpeg 相关配置及日志说明。
 
 ## License
 
